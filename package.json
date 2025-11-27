@@ -1,0 +1,29 @@
+{
+  "name": "runic-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Solana-based M2M execution and payment protocol",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "pnpm --filter @runic/api dev",
+    "build": "pnpm -r build",
+    "db:generate": "pnpm --filter @runic/api db:generate",
+    "db:push": "pnpm --filter @runic/api db:push",
+    "db:migrate": "pnpm --filter @runic/api db:migrate",
+    "db:studio": "pnpm --filter @runic/api db:studio",
+    "db:seed": "pnpm --filter @runic/api db:seed",
+    "sdk:build": "pnpm --filter @runic/sdk build",
+    "lint": "pnpm -r lint"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "packageManager": "pnpm@8.10.0"
+}

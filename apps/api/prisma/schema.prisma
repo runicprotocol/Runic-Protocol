@@ -1,0 +1,197 @@
+// Runic Protocol - Prisma Schema
+// A Solana-based machine-to-machine (M2M) execution and payment protocol
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// USER - Account that can create Tasks and own Agents
+// ============================================
+model User {
+  id        String   @id @default(cuid())
+  email     String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  agents       Agent[]
+  tasksCreated Task[]  @relation("UserTasks")
+}
+
+// ============================================
+// AGENT - An autonomous agent that executes Tasks
+// ============================================
+model Agent {
+  id                   String  @id @default(cuid())
+  name                 String
+  description          String?
+  ownerUserId          String
+  ownerUser            User    @relation(fields: [ownerUserId], references: [id])
+  walletAddress        String  // Solana public key (base58)
+  capabilities         String[] // e.g. ["sniper", "indexer", "market-maker"]
+  reputationScore      Float   @default(3.0)
+  totalTasksCompleted  Int     @default(0)
+  totalTasksFailed     Int     @default(0)
+  avgCompletionSeconds Float?
+  isActive             Boolean @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  tasksAssigned    Task[]
+  offers           Offer[]
+  executions       Execution[]
+  payments         Payment[]
+  reputationEvents ReputationEvent[]
+
+  @@index([ownerUserId])
+  @@index([isActive])
+  @@index([walletAddress])
+}
+
+// ============================================
+// TASK - A task posted by a user for Agents to execute
+// ============================================
+enum TaskStatus {
+  OPEN        // Just created, waiting for auction
+  IN_AUCTION  // Auction is active, accepting offers
+  ASSIGNED    // Assigned to an Agent, waiting to start
+  RUNNING     // Currently being executed
+  COMPLETED   // Successfully completed
+  FAILED      // Execution failed
+  CANCELLED   // Cancelled by user
+}
+
+model Task {
+  id                   String     @id @default(cuid())
+  title                String
+  description          String
+  chain                String     @default("solana")
+  paymentTokenSymbol   String     // e.g. "SOL", "USDC", "BONK"
+  budgetLamports       BigInt     // lamports
+  createdByUserId      String
+  createdByUser        User       @relation("UserTasks", fields: [createdByUserId], references: [id])
+  status               TaskStatus @default(OPEN)
+  requiredCapabilities String[]   // required Agent capabilities
+  deadline             DateTime?
+  assignedAgentId      String?
+  assignedAgent        Agent?     @relation(fields: [assignedAgentId], references: [id])
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+
+  offers           Offer[]
+  executions       Execution[]
+  payments         Payment[]
+  reputationEvents ReputationEvent[]
+
+  @@index([createdByUserId])
+  @@index([status])
+  @@index([assignedAgentId])
+}
+
+// ============================================
+// OFFER - A bid from an Agent on a Task
+// ============================================
+enum OfferStatus {
+  PENDING   // Waiting for auction result
+  ACCEPTED  // Won the auction
+  REJECTED  // Lost the auction
+  CANCELLED // Withdrawn by Agent
+}
+
+model Offer {
+  id            String      @id @default(cuid())
+  taskId        String
+  task          Task        @relation(fields: [taskId], references: [id])
+  agentId       String
+  agent         Agent       @relation(fields: [agentId], references: [id])
+  priceLamports BigInt
+  etaSeconds    Int
+  status        OfferStatus @default(PENDING)
+  score         Float       // Computed score for auction ranking
+  createdAt     DateTime    @default(now())
+
+  @@index([taskId])
+  @@index([agentId])
+  @@index([status])
+}
+
+// ============================================
+// EXECUTION - Record of an Agent executing a Task
+// ============================================
+enum ExecutionStatus {
+  PENDING // Waiting to start
+  RUNNING // Currently executing
+  SUCCESS // Completed successfully
+  FAILURE // Failed to complete
+}
+
+model Execution {
+  id                  String          @id @default(cuid())
+  taskId              String
+  task                Task            @relation(fields: [taskId], references: [id])
+  agentId             String
+  agent               Agent           @relation(fields: [agentId], references: [id])
+  startedAt           DateTime        @default(now())
+  completedAt         DateTime?
+  status              ExecutionStatus @default(PENDING)
+  signedResultPayload String?         // JSON string or opaque data
+  resultSummary       String?
+  errorMessage        String?
+  proofHash           String?         // for future ZK or log integrity
+  createdAt           DateTime        @default(now())
+
+  @@index([taskId])
+  @@index([agentId])
+  @@index([status])
+}
+
+// ============================================
+// PAYMENT - Simulated Solana payment for completed Tasks
+// ============================================
+enum PaymentStatus {
+  PENDING   // Waiting to be settled
+  COMPLETED // Payment sent
+  FAILED    // Payment failed
+  REFUNDED  // Payment refunded
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  taskId         String
+  task           Task          @relation(fields: [taskId], references: [id])
+  agentId        String
+  agent          Agent         @relation(fields: [agentId], references: [id])
+  amountLamports BigInt
+  tokenSymbol    String
+  status         PaymentStatus @default(PENDING)
+  txHash         String?
+  chain          String        @default("solana")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([taskId])
+  @@index([agentId])
+  @@index([status])
+}
+
+// ============================================
+// REPUTATION EVENT - Track reputation changes for Agents
+// ============================================
+model ReputationEvent {
+  id        String   @id @default(cuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id])
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id])
+  deltaScore Float
+  reason    String
+  createdAt DateTime @default(now())
+
+  @@index([agentId])
+  @@index([taskId])
+}
