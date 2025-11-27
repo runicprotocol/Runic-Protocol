@@ -39,3 +39,6 @@ coverage/
 *.tmp
 *.temp
 
+# Private - Landing page (not open source)
+landing/
+
