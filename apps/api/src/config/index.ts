@@ -3,14 +3,13 @@ import path from 'path';
 
 // Load .env from project root
 dotenv.config({ path: path.resolve(__dirname, '../../../../.env') });
+// Also try loading from api directory
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export const config = {
   // Server
   port: parseInt(process.env.PORT || '3001', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
-  
-  // WebSocket
-  wsPort: parseInt(process.env.WS_PORT || '3002', 10),
   
   // JWT
   jwt: {
@@ -21,10 +20,19 @@ export const config = {
   // Database
   databaseUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/runic_protocol',
   
-  // Solana (simulated for now)
+  // Solana Configuration
   solana: {
+    // RPC endpoint
     rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com',
+    
+    // Network: 'mainnet-beta', 'devnet', or 'testnet'
     network: process.env.SOLANA_NETWORK || 'devnet',
+    
+    // Treasury wallet private key (base58 or JSON array)
+    treasuryPrivateKey: process.env.SOLANA_TREASURY_PRIVATE_KEY,
+    
+    // Enable real transactions (false = simulated)
+    useRealTransactions: process.env.SOLANA_REAL_TRANSACTIONS === 'true',
   },
   
   // Auction settings
@@ -32,14 +40,13 @@ export const config = {
     windowMs: parseInt(process.env.AUCTION_WINDOW_MS || '15000', 10), // 15 seconds for dev
   },
   
-  // Scoring weights for Rune Offers
+  // Scoring weights for Offers
   scoring: {
     alpha: 1.0,   // Price weight (lower is better)
     beta: 0.5,    // ETA weight (lower is better)
     gamma: 1.0,   // Reputation weight (higher is better)
-    base: 10.0,   // Base score
+    base: 100.0,  // Base score
   },
 } as const;
 
 export type Config = typeof config;
-

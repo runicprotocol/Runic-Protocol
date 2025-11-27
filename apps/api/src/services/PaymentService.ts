@@ -1,66 +1,20 @@
 import { Payment, PaymentStatus } from '@prisma/client';
-import { v4 as uuidv4 } from 'uuid';
 import prisma from '../utils/prisma.js';
 import { NotFoundError, ConflictError } from '../utils/errors.js';
 import logger from '../utils/logger.js';
-
-/**
- * Interface for Solana payment client
- * Abstracted to allow real and simulated implementations
- */
-export interface SolanaClient {
-  sendPayment(params: {
-    fromPubkey: string;
-    toPubkey: string;
-    amountLamports: bigint;
-    tokenMint?: string;
-  }): Promise<{ txHash: string }>;
-}
-
-/**
- * DummySolanaClient - Simulated Solana payment client
- * 
- * Does NOT call real RPC yet.
- * Logs the intent and returns a fake txHash.
- */
-export class DummySolanaClient implements SolanaClient {
-  async sendPayment(params: {
-    fromPubkey: string;
-    toPubkey: string;
-    amountLamports: bigint;
-    tokenMint?: string;
-  }): Promise<{ txHash: string }> {
-    const txHash = `simulated-${uuidv4()}`;
-
-    logger.info('[SIMULATED] Solana payment sent', {
-      from: params.fromPubkey.slice(0, 8) + '...',
-      to: params.toPubkey.slice(0, 8) + '...',
-      amount: params.amountLamports.toString(),
-      tokenMint: params.tokenMint || 'SOL (native)',
-      txHash,
-    });
-
-    // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    return { txHash };
-  }
-}
+import { createSolanaClient, getExplorerUrl } from '../solana/index.js';
+import type { SolanaClient } from '../solana/index.js';
 
 /**
  * PaymentService - Manages payments for completed Tasks
  * 
- * Uses a SolanaClient interface that can be swapped between
- * simulated (dev) and real (production) implementations.
+ * Uses SolanaClient for real or simulated transactions based on config.
  */
 export class PaymentService {
   private solanaClient: SolanaClient;
 
-  // Treasury address (simulated)
-  private treasuryAddress = 'RunicTreasury11111111111111111111111111111';
-
-  constructor(solanaClient?: SolanaClient) {
-    this.solanaClient = solanaClient || new DummySolanaClient();
+  constructor() {
+    this.solanaClient = createSolanaClient();
   }
 
   /**
@@ -97,7 +51,7 @@ export class PaymentService {
   /**
    * Settle a pending payment
    * 
-   * Uses SolanaClient to send the payment (simulated or real)
+   * Sends real or simulated transaction based on configuration
    */
   async settlePayment(paymentId: string): Promise<Payment> {
     const payment = await prisma.payment.findUnique({
@@ -116,9 +70,8 @@ export class PaymentService {
     }
 
     try {
-      // Send payment via Solana client
+      // Send payment via Solana client (real or simulated)
       const { txHash } = await this.solanaClient.sendPayment({
-        fromPubkey: this.treasuryAddress,
         toPubkey: payment.agent.walletAddress,
         amountLamports: payment.amountLamports,
         tokenMint: payment.tokenSymbol === 'SOL' ? undefined : payment.tokenSymbol,
@@ -136,6 +89,7 @@ export class PaymentService {
       logger.info('Payment settled', {
         paymentId,
         txHash,
+        explorerUrl: getExplorerUrl(txHash),
         amountLamports: payment.amountLamports.toString(),
       });
 
@@ -150,7 +104,7 @@ export class PaymentService {
 
       logger.error('Payment settlement failed', error as Error);
 
-      return failedPayment;
+      throw error;
     }
   }
 
@@ -222,7 +176,7 @@ export class PaymentService {
   }
 
   /**
-   * Refund a payment
+   * Refund a payment (mark as refunded - actual refund would need implementation)
    */
   async refundPayment(paymentId: string): Promise<Payment> {
     const payment = await this.getPaymentById(paymentId);
@@ -231,7 +185,7 @@ export class PaymentService {
       throw new ConflictError(`Cannot refund payment: status is ${payment.status}`);
     }
 
-    // In a real implementation, this would initiate a refund transaction
+    // Note: In production, you'd implement actual refund transaction here
     const updatedPayment = await prisma.payment.update({
       where: { id: paymentId },
       data: { status: 'REFUNDED' },
@@ -267,6 +221,22 @@ export class PaymentService {
       pendingPayments: pending.length,
       completedPayments: completed.length,
     };
+  }
+
+  /**
+   * Get agent wallet balance
+   */
+  async getAgentBalance(agentId: string): Promise<bigint> {
+    const agent = await prisma.agent.findUnique({
+      where: { id: agentId },
+      select: { walletAddress: true },
+    });
+
+    if (!agent) {
+      throw new NotFoundError('Agent', agentId);
+    }
+
+    return this.solanaClient.getBalance(agent.walletAddress);
   }
 }
 
