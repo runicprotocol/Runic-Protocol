@@ -36,11 +36,38 @@
  * });
  * ```
  * 
+ * @example Run Forever with Strategy
+ * ```typescript
+ * import { RunicClient, percentageOfBudgetStrategy } from '@runic/sdk';
+ * 
+ * const client = new RunicClient({ ... });
+ * 
+ * await client.runForever(
+ *   percentageOfBudgetStrategy(80, 30), // Bid 80% of budget, 30s ETA
+ *   async (task) => {
+ *     const result = await performWork(task);
+ *     return { success: true, result: JSON.stringify(result) };
+ *   }
+ * );
+ * ```
+ * 
  * @packageDocumentation
  */
 
 // Main client
-export { RunicClient } from './client.js';
+export { 
+  RunicClient,
+  // Strategies
+  fixedPriceStrategy,
+  percentageOfBudgetStrategy,
+  capabilityFilterStrategy,
+} from './client.js';
+
+// Types
+export type { 
+  BiddingStrategy, 
+  ExecutionHandler 
+} from './client.js';
 
 // HTTP client for direct API access
 export { HttpClient } from './internal/http.js';

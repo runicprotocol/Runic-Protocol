@@ -1,6 +1,7 @@
 import { Execution, ExecutionStatus } from '@prisma/client';
 import prisma from '../utils/prisma.js';
-import { NotFoundError, ValidationError, ConflictError } from '../utils/errors.js';
+import { NotFoundError, ValidationError } from '../utils/errors.js';
+import { guardStatus } from '../utils/state-machine.js';
 import logger from '../utils/logger.js';
 import { paymentService } from './PaymentService.js';
 import { reputationService } from './ReputationService.js';
@@ -17,18 +18,13 @@ export interface CompleteExecutionInput {
 /**
  * ExecutionService - Manages Task execution lifecycle
  * 
- * Execution is the process of an Agent performing the work
- * defined in a Task. The execution goes through:
- * PENDING -> RUNNING -> SUCCESS/FAILURE
+ * Uses state machine to enforce valid transitions.
  */
 export class ExecutionService {
   /**
    * Start executing a Task
-   * 
-   * Validates that the Agent is assigned to this Task
    */
   async startExecution(taskId: string, agentId: string): Promise<Execution> {
-    // Get the Task
     const task = await prisma.task.findUnique({
       where: { id: taskId },
     });
@@ -39,13 +35,15 @@ export class ExecutionService {
 
     // Validate Agent is assigned
     if (task.assignedAgentId !== agentId) {
-      throw new ValidationError('Agent is not assigned to this Task');
+      throw new ValidationError(
+        `Agent ${agentId} is not assigned to this Task. ` +
+        `Assigned agent: ${task.assignedAgentId || 'none'}`
+      );
     }
 
-    // Validate Task status
-    if (task.status !== 'ASSIGNED') {
-      throw new ConflictError(`Cannot start execution: Task status is ${task.status}`);
-    }
+    // Validate Task status using state machine
+    const guard = guardStatus(task.status);
+    guard.assertCanStartExecution();
 
     // Find or create Execution record
     let execution = await prisma.execution.findFirst({
@@ -92,24 +90,12 @@ export class ExecutionService {
 
   /**
    * Complete execution of a Task
-   * 
-   * On success:
-   * - Mark Execution as SUCCESS
-   * - Mark Task as COMPLETED
-   * - Create pending Payment
-   * - Apply positive reputation
-   * 
-   * On failure:
-   * - Mark Execution as FAILURE
-   * - Mark Task as FAILED
-   * - Apply negative reputation
    */
   async completeExecution(
     taskId: string,
     agentId: string,
     input: CompleteExecutionInput
   ): Promise<Execution> {
-    // Get the Task
     const task = await prisma.task.findUnique({
       where: { id: taskId },
     });
@@ -122,6 +108,10 @@ export class ExecutionService {
     if (task.assignedAgentId !== agentId) {
       throw new ValidationError('Agent is not assigned to this Task');
     }
+
+    // Validate Task can be completed
+    const guard = guardStatus(task.status);
+    guard.assertCanComplete();
 
     // Find the running Execution
     const execution = await prisma.execution.findFirst({
@@ -152,6 +142,9 @@ export class ExecutionService {
       },
     });
 
+    // Calculate execution duration
+    const durationSeconds = (completedAt.getTime() - execution.startedAt.getTime()) / 1000;
+
     if (input.success) {
       // Mark Task as COMPLETED
       await prisma.task.update({
@@ -171,14 +164,15 @@ export class ExecutionService {
       await reputationService.applyEvent(
         agentId,
         taskId,
-        0.1, // Positive delta
-        'Successfully completed Task execution'
+        0.1,
+        `Successfully completed Task in ${durationSeconds.toFixed(1)}s`
       );
 
       logger.info('Execution completed successfully', {
         executionId: execution.id,
         taskId,
         agentId,
+        durationSeconds,
         resultSummary: input.resultSummary,
       });
 
@@ -193,7 +187,7 @@ export class ExecutionService {
       await reputationService.applyEvent(
         agentId,
         taskId,
-        -0.2, // Negative delta
+        -0.2,
         `Task execution failed: ${input.errorMessage || 'Unknown error'}`
       );
 
@@ -201,6 +195,7 @@ export class ExecutionService {
         executionId: execution.id,
         taskId,
         agentId,
+        durationSeconds,
         errorMessage: input.errorMessage,
       });
     }

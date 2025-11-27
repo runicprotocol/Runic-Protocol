@@ -16,31 +16,27 @@ import type {
 } from './types.js';
 
 /**
+ * Bidding strategy function type
+ */
+export type BiddingStrategy = (task: TaskSummary) => OfferParams | null | Promise<OfferParams | null>;
+
+/**
+ * Execution handler function type
+ */
+export type ExecutionHandler = (task: TaskSummary) => Promise<{
+  success: boolean;
+  result?: string;
+  error?: string;
+}>;
+
+/**
  * RunicClient - SDK for Agents to interact with Runic Protocol
- * 
- * @example
- * ```typescript
- * const client = new RunicClient({
- *   baseUrl: 'http://localhost:3001',
- *   wsUrl: 'ws://localhost:3001',
- *   authToken: '<JWT>',
- *   agentId: '<AGENT_ID>',
- * });
- * 
- * await client.connect();
- * 
- * client.onTaskAvailable(async (task) => {
- *   await client.submitOffer(task.id, {
- *     priceLamports: 1000000,
- *     etaSeconds: 30,
- *   });
- * });
- * ```
  */
 export class RunicClient {
   private config: RunicClientConfig;
   private http: HttpClient;
   private ws: WsClient;
+  private isRunning = false;
 
   constructor(config: RunicClientConfig) {
     this.config = config;
@@ -70,6 +66,7 @@ export class RunicClient {
    * Disconnect from the network
    */
   disconnect(): void {
+    this.isRunning = false;
     this.ws.disconnect();
   }
 
@@ -86,7 +83,6 @@ export class RunicClient {
 
   /**
    * Subscribe to available task notifications
-   * Called when a new task enters auction that matches agent capabilities
    */
   onTaskAvailable(handler: (task: TaskSummary) => void): () => void {
     return this.ws.on<TaskAvailableEvent>('tasks:available', (data) => {
@@ -96,11 +92,9 @@ export class RunicClient {
 
   /**
    * Subscribe to task assignment notifications
-   * Called when this agent wins an auction
    */
   onTaskAssigned(handler: (task: TaskSummary) => void): () => void {
     return this.ws.on<TaskAssignedEvent>('tasks:assigned', async (data) => {
-      // Fetch full task details
       const { task } = await this.http.getTask(data.taskId);
       handler({
         id: task.id,
@@ -160,6 +154,157 @@ export class RunicClient {
   getHttpClient(): HttpClient {
     return this.http;
   }
+
+  // ============================================
+  // Convenience Methods
+  // ============================================
+
+  /**
+   * Run the agent forever with automatic bidding and execution
+   * 
+   * @param strategy - Function that returns offer params for a task, or null to skip
+   * @param executor - Function that executes the task and returns result
+   * 
+   * @example
+   * ```typescript
+   * await client.runForever(
+   *   // Bidding strategy
+   *   (task) => ({
+   *     priceLamports: (BigInt(task.budgetLamports) * 80n / 100n).toString(),
+   *     etaSeconds: 30,
+   *   }),
+   *   // Execution handler
+   *   async (task) => {
+   *     const result = await doWork(task);
+   *     return { success: true, result: JSON.stringify(result) };
+   *   }
+   * );
+   * ```
+   */
+  async runForever(
+    strategy: BiddingStrategy,
+    executor: ExecutionHandler
+  ): Promise<void> {
+    this.isRunning = true;
+
+    // Connect if not already
+    if (!this.isConnected()) {
+      await this.connect();
+    }
+
+    // Handle available tasks
+    this.onTaskAvailable(async (task) => {
+      if (!this.isRunning) return;
+
+      try {
+        const offer = await strategy(task);
+        if (offer) {
+          await this.submitOffer(task.id, offer);
+          console.log(`[RunicClient] Submitted offer for task ${task.id}`);
+        }
+      } catch (error) {
+        console.error(`[RunicClient] Error submitting offer:`, error);
+      }
+    });
+
+    // Handle assigned tasks
+    this.onTaskAssigned(async (task) => {
+      if (!this.isRunning) return;
+
+      console.log(`[RunicClient] Assigned to task ${task.id}`);
+
+      try {
+        // Start execution
+        await this.startExecution(task.id);
+        console.log(`[RunicClient] Started execution of task ${task.id}`);
+
+        // Run executor
+        const result = await executor(task);
+
+        // Complete execution
+        await this.completeExecution(task.id, {
+          success: result.success,
+          signedResultPayload: result.result,
+          resultSummary: result.success ? 'Completed successfully' : 'Failed',
+          errorMessage: result.error,
+        });
+
+        console.log(`[RunicClient] Completed task ${task.id}: ${result.success ? 'SUCCESS' : 'FAILED'}`);
+
+      } catch (error: any) {
+        console.error(`[RunicClient] Execution error:`, error);
+
+        // Report failure
+        try {
+          await this.completeExecution(task.id, {
+            success: false,
+            errorMessage: error.message || 'Unknown error',
+          });
+        } catch (e) {
+          console.error(`[RunicClient] Failed to report error:`, e);
+        }
+      }
+    });
+
+    // Keep running until disconnect
+    return new Promise((resolve) => {
+      const checkInterval = setInterval(() => {
+        if (!this.isRunning) {
+          clearInterval(checkInterval);
+          resolve();
+        }
+      }, 1000);
+    });
+  }
+}
+
+// ============================================
+// Pre-built Bidding Strategies
+// ============================================
+
+/**
+ * Fixed price bidding strategy
+ * Always bids the same price and ETA
+ */
+export function fixedPriceStrategy(priceLamports: string, etaSeconds: number): BiddingStrategy {
+  return () => ({
+    priceLamports,
+    etaSeconds,
+  });
+}
+
+/**
+ * Percentage of budget bidding strategy
+ * Bids a percentage of the task's budget
+ */
+export function percentageOfBudgetStrategy(percentage: number, etaSeconds: number): BiddingStrategy {
+  return (task) => {
+    const budget = BigInt(task.budgetLamports);
+    const price = (budget * BigInt(Math.floor(percentage))) / 100n;
+    return {
+      priceLamports: price.toString(),
+      etaSeconds,
+    };
+  };
+}
+
+/**
+ * Capability-aware bidding strategy
+ * Only bids on tasks matching specific capabilities
+ */
+export function capabilityFilterStrategy(
+  capabilities: string[],
+  baseStrategy: BiddingStrategy
+): BiddingStrategy {
+  return (task) => {
+    // Check if task requires capabilities we don't have
+    for (const required of task.requiredCapabilities) {
+      if (!capabilities.includes(required)) {
+        return null; // Skip this task
+      }
+    }
+    return baseStrategy(task);
+  };
 }
 
 export default RunicClient;

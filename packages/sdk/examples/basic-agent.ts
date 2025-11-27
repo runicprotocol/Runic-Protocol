@@ -1,14 +1,16 @@
 /**
  * Basic Agent Example
  * 
- * This example demonstrates how to create a simple Agent
- * that connects to the Runic Protocol network, bids on Tasks,
- * and executes work.
+ * Demonstrates how to create a Runic Protocol agent using the SDK.
  * 
  * Run with: npx tsx examples/basic-agent.ts
  */
 
-import { RunicClient } from '../src/index.js';
+import { 
+  RunicClient, 
+  percentageOfBudgetStrategy,
+  capabilityFilterStrategy,
+} from '../src/index.js';
 
 // Configuration - replace with your values
 const CONFIG = {
@@ -18,8 +20,14 @@ const CONFIG = {
   agentId: process.env.RUNIC_AGENT_ID || '<AGENT_ID>',
 };
 
+// Agent capabilities
+const MY_CAPABILITIES = ['sniper', 'token-analysis', 'data-fetch'];
+
 async function main() {
-  console.log('🤖 Starting Runic Protocol Agent...\n');
+  console.log('🤖 Starting Runic Protocol Agent\n');
+  console.log(`   Agent ID: ${CONFIG.agentId}`);
+  console.log(`   Capabilities: ${MY_CAPABILITIES.join(', ')}`);
+  console.log(`   API: ${CONFIG.baseUrl}\n`);
 
   // Create the client
   const client = new RunicClient({
@@ -29,90 +37,45 @@ async function main() {
     agentId: CONFIG.agentId,
   });
 
-  // Connect to the network
-  console.log('🔌 Connecting to Runic Protocol...');
-  await client.connect();
-  console.log('✅ Connected!\n');
+  // Define bidding strategy
+  // - Only bid on tasks we can handle
+  // - Bid 80% of budget with 30s ETA
+  const strategy = capabilityFilterStrategy(
+    MY_CAPABILITIES,
+    percentageOfBudgetStrategy(80, 30)
+  );
 
-  // Handle available tasks
-  client.onTaskAvailable(async (task) => {
-    console.log('\n📋 Task Available!');
-    console.log(`   ID: ${task.id}`);
-    console.log(`   Title: ${task.title}`);
-    console.log(`   Description: ${task.description}`);
-    console.log(`   Budget: ${task.budgetLamports} lamports`);
-    console.log(`   Required: ${task.requiredCapabilities.join(', ') || 'None'}`);
+  // Define execution handler
+  const executor = async (task: { id: string; title: string; description: string }) => {
+    console.log(`\n⚡ Executing: ${task.title}`);
+    console.log(`   Description: ${task.description.slice(0, 100)}...`);
 
-    // Submit an offer
-    // Simple strategy: bid 80% of budget with 30s ETA
-    const bidPrice = BigInt(task.budgetLamports) * BigInt(80) / BigInt(100);
-    
-    console.log(`\n💰 Submitting offer: ${bidPrice} lamports, 30s ETA`);
+    // Simulate work
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
-    try {
-      await client.submitOffer(task.id, {
-        priceLamports: bidPrice.toString(),
-        etaSeconds: 30,
-      });
-      console.log('✅ Offer submitted!');
-    } catch (error: any) {
-      console.error(`❌ Failed: ${error.message}`);
-    }
-  });
+    // Return success
+    return {
+      success: true,
+      result: JSON.stringify({
+        taskId: task.id,
+        completedAt: new Date().toISOString(),
+        output: 'Task executed successfully',
+      }),
+    };
+  };
 
-  // Handle task assignments
-  client.onTaskAssigned(async (task) => {
-    console.log('\n🎯 Task Assigned!');
-    console.log(`   ID: ${task.id}`);
-    console.log(`   Title: ${task.title}`);
-
-    try {
-      // Start execution
-      console.log('\n⚡ Starting execution...');
-      await client.startExecution(task.id);
-
-      // Simulate work
-      console.log('🔨 Working...');
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      // Complete execution
-      console.log('✅ Completing execution...');
-      await client.completeExecution(task.id, {
-        success: true,
-        signedResultPayload: JSON.stringify({
-          result: 'Task completed successfully',
-          timestamp: new Date().toISOString(),
-        }),
-        resultSummary: 'Execution completed in demo mode',
-      });
-
-      console.log('🎉 Task completed successfully!');
-
-    } catch (error: any) {
-      console.error(`❌ Execution failed: ${error.message}`);
-
-      // Report failure
-      try {
-        await client.completeExecution(task.id, {
-          success: false,
-          errorMessage: error.message,
-        });
-      } catch (e) {
-        console.error('Failed to report error');
-      }
-    }
-  });
-
-  console.log('🎧 Listening for tasks...');
-  console.log('   Press Ctrl+C to stop\n');
-
-  // Keep process running
+  // Handle shutdown
   process.on('SIGINT', () => {
-    console.log('\n👋 Shutting down...');
+    console.log('\n\n👋 Shutting down agent...');
     client.disconnect();
     process.exit(0);
   });
+
+  // Run forever
+  console.log('🔌 Connecting to Runic Protocol...');
+  console.log('🎧 Listening for tasks. Press Ctrl+C to stop.\n');
+
+  await client.runForever(strategy, executor);
 }
 
 main().catch(console.error);
-

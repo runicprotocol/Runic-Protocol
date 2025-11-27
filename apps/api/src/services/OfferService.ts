@@ -1,6 +1,7 @@
 import { Offer, OfferStatus } from '@prisma/client';
 import prisma from '../utils/prisma.js';
 import { NotFoundError, ValidationError, AuctionError } from '../utils/errors.js';
+import { guardStatus } from '../utils/state-machine.js';
 import logger from '../utils/logger.js';
 import { agentService } from './AgentService.js';
 
@@ -12,20 +13,12 @@ export interface CreateOfferInput {
 /**
  * OfferService - Manages Offers (bids) from Agents
  * 
- * Agents submit offers during the auction window to compete
- * for Task assignments. Offers are scored based on price, ETA,
- * and Agent reputation.
+ * Includes state machine validation to ensure offers
+ * are only accepted when Task is in valid state.
  */
 export class OfferService {
   /**
-   * Create a new Offer
-   * 
-   * Validates:
-   * - Task status is OPEN or IN_AUCTION
-   * - Agent is active
-   * - Agent has required capabilities
-   * 
-   * Computes a score for auction ranking
+   * Create a new Offer with full validation
    */
   async createOffer(
     agentId: string,
@@ -41,23 +34,23 @@ export class OfferService {
       throw new NotFoundError('Task', taskId);
     }
 
-    // Validate Task status
-    if (task.status !== 'OPEN' && task.status !== 'IN_AUCTION') {
-      throw new AuctionError(`Cannot submit offer: Task status is ${task.status}`);
-    }
+    // Validate Task status using state machine
+    const guard = guardStatus(task.status);
+    guard.assertCanAcceptOffers();
 
     // Get the Agent
     const agent = await agentService.getAgentById(agentId);
 
     // Validate Agent is active
     if (!agent.isActive) {
-      throw new ValidationError('Agent is not active');
+      throw new ValidationError('Agent is not active and cannot submit offers');
     }
 
     // Validate Agent has required capabilities
     if (!agentService.hasRequiredCapabilities(agent, task.requiredCapabilities)) {
       throw new ValidationError(
-        `Agent lacks required capabilities: ${task.requiredCapabilities.join(', ')}`
+        `Agent lacks required capabilities. Needed: [${task.requiredCapabilities.join(', ')}]. ` +
+        `Agent has: [${agent.capabilities.join(', ')}]`
       );
     }
 
@@ -71,7 +64,14 @@ export class OfferService {
     });
 
     if (existingOffer) {
-      throw new ValidationError('Agent already has a pending offer for this Task');
+      throw new AuctionError('Agent already has a pending offer for this Task. Cancel it first to submit a new one.');
+    }
+
+    // Validate price doesn't exceed budget
+    if (input.priceLamports > task.budgetLamports) {
+      throw new ValidationError(
+        `Offer price (${input.priceLamports}) exceeds task budget (${task.budgetLamports})`
+      );
     }
 
     // Compute score
@@ -108,27 +108,27 @@ export class OfferService {
   /**
    * Compute offer score for auction ranking
    * 
-   * Score formula:
-   * - Lower price is better
-   * - Lower ETA is better  
-   * - Higher reputation is better
-   * 
-   * score = 100 - (1 * log(price)) - (0.5 * log(eta + 1)) + (1 * reputation)
+   * score = 100 - (α × log(price)) - (β × log(eta + 1)) + (γ × reputation)
    */
   computeOfferScore(
     priceLamports: bigint,
     etaSeconds: number,
     reputationScore: number
   ): number {
+    const alpha = 1.0;  // Price weight
+    const beta = 0.5;   // ETA weight
+    const gamma = 1.0;  // Reputation weight
+    const base = 100.0;
+
     const normalizedPrice = Math.log(Number(priceLamports) + 1);
     const normalizedEta = Math.log(etaSeconds + 1);
 
-    const score = 100 
-      - (1 * normalizedPrice) 
-      - (0.5 * normalizedEta) 
-      + (1 * reputationScore);
+    const score = base 
+      - (alpha * normalizedPrice) 
+      - (beta * normalizedEta) 
+      + (gamma * reputationScore);
 
-    return Math.round(score * 1000) / 1000; // Round to 3 decimal places
+    return Math.round(score * 1000) / 1000;
   }
 
   /**
@@ -234,8 +234,24 @@ export class OfferService {
       orderBy: { score: 'desc' },
     });
   }
+
+  /**
+   * Cancel an offer (if still pending)
+   */
+  async cancelOffer(offerId: string, agentId: string): Promise<Offer> {
+    const offer = await this.getOfferById(offerId);
+
+    if (offer.agentId !== agentId) {
+      throw new ValidationError('Only the offer owner can cancel it');
+    }
+
+    if (offer.status !== 'PENDING') {
+      throw new AuctionError(`Cannot cancel offer: status is ${offer.status}`);
+    }
+
+    return this.updateOfferStatus(offerId, 'CANCELLED');
+  }
 }
 
 export const offerService = new OfferService();
 export default offerService;
-

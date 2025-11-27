@@ -1,6 +1,7 @@
 import { Prisma, Task, TaskStatus } from '@prisma/client';
 import prisma from '../utils/prisma.js';
-import { NotFoundError, ValidationError, ConflictError } from '../utils/errors.js';
+import { NotFoundError, ValidationError } from '../utils/errors.js';
+import { guardStatus, assertValidTransition } from '../utils/state-machine.js';
 import logger from '../utils/logger.js';
 
 export interface CreateTaskInput {
@@ -19,17 +20,11 @@ export interface TaskFilters {
 }
 
 /**
- * TaskService - Manages Task lifecycle
- * 
- * Tasks are work requests posted by users.
- * They go through: OPEN -> IN_AUCTION -> ASSIGNED -> RUNNING -> COMPLETED/FAILED
+ * TaskService - Manages Task lifecycle with state machine enforcement
  */
 export class TaskService {
   /**
    * Create a new Task
-   * 
-   * Creates a Task and returns it with OPEN status.
-   * The caller (API route) should then start the auction.
    */
   async createTask(userId: string, input: CreateTaskInput): Promise<Task> {
     // Validate budget
@@ -57,7 +52,7 @@ export class TaskService {
     });
 
     logger.info('Task created', {
-      id: task.id,
+      taskId: task.id,
       title: task.title,
       budgetLamports: task.budgetLamports.toString(),
       requiredCapabilities: task.requiredCapabilities,
@@ -138,20 +133,26 @@ export class TaskService {
   }
 
   /**
-   * Update Task status
+   * Update Task status with state machine validation
    */
-  async updateTaskStatus(taskId: string, status: TaskStatus): Promise<Task> {
-    const task = await prisma.task.update({
+  async updateTaskStatus(taskId: string, newStatus: TaskStatus): Promise<Task> {
+    const task = await this.getTaskById(taskId);
+    
+    // Validate transition
+    assertValidTransition(task.status, newStatus);
+
+    const updated = await prisma.task.update({
       where: { id: taskId },
-      data: { status },
+      data: { status: newStatus },
     });
 
     logger.info('Task status updated', {
-      id: taskId,
-      status,
+      taskId,
+      from: task.status,
+      to: newStatus,
     });
 
-    return task;
+    return updated;
   }
 
   /**
@@ -159,11 +160,10 @@ export class TaskService {
    */
   async assignTask(taskId: string, agentId: string): Promise<Task> {
     const task = await this.getTaskById(taskId);
+    const guard = guardStatus(task.status);
 
-    // Validate current status allows assignment
-    if (task.status !== 'OPEN' && task.status !== 'IN_AUCTION') {
-      throw new ConflictError(`Cannot assign Task: status is ${task.status}`);
-    }
+    // Validate can transition to ASSIGNED
+    guard.transitionTo('ASSIGNED');
 
     const updated = await prisma.task.update({
       where: { id: taskId },
@@ -192,11 +192,9 @@ export class TaskService {
       throw new ValidationError('Only the Task creator can cancel it');
     }
 
-    // Can only cancel if not yet running or completed
-    const cancellableStatuses: TaskStatus[] = ['OPEN', 'IN_AUCTION', 'ASSIGNED'];
-    if (!cancellableStatuses.includes(task.status)) {
-      throw new ConflictError(`Cannot cancel Task: status is ${task.status}`);
-    }
+    // Validate can be cancelled
+    const guard = guardStatus(task.status);
+    guard.assertCanBeCancelled();
 
     const updated = await prisma.task.update({
       where: { id: taskId },
@@ -241,7 +239,6 @@ export class TaskService {
   async getTasksMatchingCapabilities(capabilities: string[]): Promise<Task[]> {
     const allTasks = await this.getAvailableTasks();
     
-    // Filter tasks where agent has all required capabilities
     return allTasks.filter(task => {
       if (task.requiredCapabilities.length === 0) return true;
       return task.requiredCapabilities.every(cap => capabilities.includes(cap));
@@ -251,4 +248,3 @@ export class TaskService {
 
 export const taskService = new TaskService();
 export default taskService;
-
