@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import { config } from './config/index.js';
@@ -8,6 +9,16 @@ import { auctionEngine } from './services/index.js';
 import apiRoutes from './api/index.js';
 import logger from './utils/logger.js';
 import { RunicError } from './utils/errors.js';
+import { setupSecurityMiddleware, requestIdMiddleware } from './middleware/security.js';
+import { validateEnvironment, requestSizeLimit } from './middleware/validation.js';
+
+// Validate environment on startup
+try {
+  validateEnvironment();
+} catch (error) {
+  logger.error('Environment validation failed', error as Error);
+  process.exit(1);
+}
 
 // Create Express app
 const app = express();
@@ -15,30 +26,58 @@ const app = express();
 // Create HTTP server
 const httpServer = createServer(app);
 
+// Determine CORS origin
+const corsOrigin = config.allowedOrigins.length === 1 && config.allowedOrigins[0] === '*'
+  ? '*'
+  : (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin || config.allowedOrigins.includes('*') || config.allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    };
+
 // Create Socket.IO server
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: '*', // Configure appropriately for production
+    origin: config.allowedOrigins.includes('*') ? '*' : config.allowedOrigins,
     methods: ['GET', 'POST'],
+    credentials: true,
   },
 });
 
 // Initialize WebSocket
 initializeWebSocket(io);
 
-// Middleware
+// Security middleware
+setupSecurityMiddleware().forEach(middleware => app.use(middleware));
+
+// Request ID tracking
+app.use(requestIdMiddleware);
+
+// Compression
+app.use(compression());
+
+// CORS
 app.use(cors({
-  origin: '*', // Configure appropriately for production
+  origin: corsOrigin,
   credentials: true,
 }));
-app.use(express.json());
+
+// Body parsing with size limit
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request size validation
+app.use(requestSizeLimit());
 
 // Request logging middleware
 app.use((req, res, next) => {
   const start = Date.now();
+  const requestId = req.id || 'unknown';
   res.on('finish', () => {
     const duration = Date.now() - start;
-    logger.debug(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+    logger.debug(`[${requestId}] ${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
   });
   next();
 });
@@ -63,15 +102,23 @@ app.get('/', (req, res) => {
 
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  logger.error('Unhandled error', err);
+  const requestId = req.id || 'unknown';
+  logger.error(`[${requestId}] Unhandled error`, err);
 
   if (err instanceof RunicError) {
     res.status(err.statusCode).json({
       error: { code: err.code, message: err.message },
+      requestId,
     });
   } else {
+    // Don't leak error details in production
+    const message = config.nodeEnv === 'production'
+      ? 'Internal server error'
+      : err.message || 'Internal server error';
+    
     res.status(500).json({
-      error: { code: 'INTERNAL_ERROR', message: 'Internal server error' },
+      error: { code: 'INTERNAL_ERROR', message },
+      requestId,
     });
   }
 });

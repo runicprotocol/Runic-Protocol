@@ -11,6 +11,11 @@ export const config = {
   port: parseInt(process.env.PORT || '3001', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   
+  // CORS - Allow multiple origins separated by commas
+  allowedOrigins: process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+    : (process.env.NODE_ENV === 'production' ? [] : ['*']), // Empty array in production requires explicit config
+  
   // JWT
   jwt: {
     secret: process.env.JWT_SECRET || 'runic-dev-secret-change-me',
@@ -46,6 +51,12 @@ export const config = {
     beta: 0.5,    // ETA weight (lower is better)
     gamma: 1.0,   // Reputation weight (higher is better)
     base: 100.0,  // Base score
+  },
+  
+  // Rate limiting
+  rateLimit: {
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 minutes
+    max: parseInt(process.env.RATE_LIMIT_MAX || '100', 10), // 100 requests per window
   },
 } as const;
 
